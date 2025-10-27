@@ -11,6 +11,7 @@ This project showcases **LangGraph**'s power for building stateful, multi-agent 
 - **Type Safety**: TypedDict ensures consistent state structure
 - **Modularity**: Independent agents that can be tested, swapped, or extended
 - **Real-world Application**: Not just a demo - actually makes trading decisions
+- **Tool Integration**: LangChain tools for on-demand metric calculation
 
 ## Architecture Overview
 
@@ -28,24 +29,25 @@ This project showcases **LangGraph**'s power for building stateful, multi-agent 
 ```
 
 ### Analyzer Agent
-- **Role**: AI-powered stock analyst
-- **Input**: Stock metrics (price, momentum, volatility)
-- **Process**: Uses Claude AI to analyze data
+- **Role**: AI-powered stock analyst with tool-calling
+- **Input**: Raw stock data (DataFrame)
+- **Process**: Uses Claude AI with LangChain tools to calculate metrics on-demand
+- **Tools**: `calculate_momentum`, `calculate_volatility`, `calculate_sma`, `get_current_price`
 - **Output**: BUY/SELL/HOLD recommendation + confidence score (0.0-1.0)
-- **Implementation**: [agents.py:38-111](agents.py#L38)
+- **Implementation**: [agents.py:141-265](agents.py#L141)
 
 ### Executor Agent
 - **Role**: Risk-aware trade executor
 - **Input**: Analyzer's recommendation + current portfolio
 - **Process**: Applies risk parameters, calculates position sizing
 - **Output**: Executes trade, updates portfolio
-- **Implementation**: [agents.py:156-230](agents.py#L156)
+- **Implementation**: [agents.py:300-376](agents.py#L300)
 
 ### TradingState (Shared State)
 ```python
 class TradingState(TypedDict):
     symbol: str              # Stock being analyzed
-    metrics: dict            # Technical indicators
+    stock_data: pd.DataFrame # Raw stock data (agents use tools to calculate metrics)
     analysis: str            # AI's full analysis text
     recommendation: str      # BUY/SELL/HOLD
     confidence: float        # 0.0-1.0 confidence score
@@ -56,13 +58,54 @@ class TradingState(TypedDict):
 ```
 
 **State flows through the workflow**, with each agent enriching it:
-1. Initial state → Analyzer adds `analysis`, `recommendation`, `confidence`
-2. Enriched state → Executor adds `execution_result`, updates `portfolio`
-3. Final state → Contains complete audit trail
+1. Initial state → Analyzer uses tools to calculate metrics on-demand
+2. Enriched state → Analyzer adds `analysis`, `recommendation`, `confidence`
+3. Executor state → Executor adds `execution_result`, updates `portfolio`
+4. Final state → Contains complete audit trail
+
+### LangChain Tools (On-Demand Calculation)
+
+The analyzer agent uses **LangChain tools** to calculate metrics dynamically:
+
+```python
+@tool
+def calculate_momentum(symbol: str, lookback: int = 20) -> float:
+    """Calculate price momentum percentage for a stock."""
+    # Accesses global stock data and calculates on-demand
+    ...
+
+@tool
+def calculate_volatility(symbol: str, lookback: int = 20) -> float:
+    """Calculate price volatility (standard deviation / mean)."""
+    ...
+
+@tool
+def calculate_sma(symbol: str, period: int = 10) -> float:
+    """Calculate Simple Moving Average."""
+    ...
+
+@tool
+def get_current_price(symbol: str) -> float:
+    """Get the current (most recent) price."""
+    ...
+```
+
+**How it works**:
+1. LLM receives prompt: "Analyze STOCK088 using available tools"
+2. LLM decides to call tools: `get_current_price("STOCK088")`, `calculate_momentum("STOCK088")`, etc.
+3. Tools execute and return results to LLM
+4. LLM analyzes tool results and provides recommendation
+
+**Benefits**:
+- Metrics calculated only when needed (on-demand)
+- LLM can choose which tools to use based on context
+- Demonstrates proper LangChain/LangGraph tool-calling patterns
+- Easy to add new analytical tools without changing state structure
 
 ## Key Features
 
 **Multi-Agent LangGraph System** with stateful workflow
+**LangChain Tool Integration** for on-demand metric calculation
 **Claude AI Integration** for intelligent stock analysis
 **5 Risk Levels** with dynamic position sizing
 **4 Selection Strategies** (momentum, volatility, mixed, contrarian)

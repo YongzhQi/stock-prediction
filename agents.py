@@ -1,10 +1,13 @@
 """AI Agents for stock trading analysis and execution."""
 from typing import TypedDict, Annotated, Literal
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.tools import tool
 from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 import os
+import pandas as pd
+import numpy as np
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -14,7 +17,7 @@ load_dotenv()
 class TradingState(TypedDict):
     """State for the trading workflow."""
     symbol: str
-    metrics: dict
+    stock_data: pd.DataFrame  # Raw stock data instead of pre-calculated metrics
     analysis: str
     recommendation: Literal["BUY", "SELL", "HOLD"]
     confidence: float
@@ -22,6 +25,106 @@ class TradingState(TypedDict):
     portfolio: dict
     messages: list
     risk_level: str  # "very_aggressive", "aggressive", "moderate", "conservative", "very_conservative"
+
+
+# Global variable to hold stock data for tools (set by analyzer_agent)
+_TOOL_STOCK_DATA = None
+
+
+# Define tools for technical indicator calculation
+@tool
+def calculate_momentum(symbol: str, lookback: int = 20) -> float:
+    """Calculate price momentum percentage for a stock over the lookback period.
+
+    Args:
+        symbol: Stock symbol to analyze
+        lookback: Number of days to look back (default 20)
+
+    Returns:
+        Momentum as percentage change
+    """
+    if _TOOL_STOCK_DATA is None:
+        return 0.0
+
+    df = _TOOL_STOCK_DATA
+    history = df[df['symbol'] == symbol].sort_values('date', ascending=False).head(lookback)
+    history = history.sort_values('date')
+    prices = history['price'].values
+
+    if len(prices) < 2:
+        return 0.0
+
+    momentum = (prices[-1] - prices[0]) / prices[0] * 100
+    return round(momentum, 2)
+
+
+@tool
+def calculate_volatility(symbol: str, lookback: int = 20) -> float:
+    """Calculate price volatility (standard deviation / mean) for a stock.
+
+    Args:
+        symbol: Stock symbol to analyze
+        lookback: Number of days to look back (default 20)
+
+    Returns:
+        Volatility as a decimal (e.g., 0.0234 = 2.34%)
+    """
+    if _TOOL_STOCK_DATA is None:
+        return 0.0
+
+    df = _TOOL_STOCK_DATA
+    history = df[df['symbol'] == symbol].sort_values('date', ascending=False).head(lookback)
+    prices = history['price'].values
+
+    if len(prices) < 2:
+        return 0.0
+
+    avg_price = np.mean(prices)
+    volatility = np.std(prices) / avg_price if avg_price > 0 else 0
+    return round(volatility, 4)
+
+
+@tool
+def calculate_sma(symbol: str, period: int = 10) -> float:
+    """Calculate Simple Moving Average for a stock.
+
+    Args:
+        symbol: Stock symbol to analyze
+        period: Number of days for SMA calculation (default 10)
+
+    Returns:
+        Simple Moving Average price
+    """
+    if _TOOL_STOCK_DATA is None:
+        return 0.0
+
+    df = _TOOL_STOCK_DATA
+    history = df[df['symbol'] == symbol].sort_values('date', ascending=False).head(period)
+    prices = history['price'].values
+
+    if len(prices) < 1:
+        return 0.0
+
+    sma = np.mean(prices)
+    return round(sma, 2)
+
+
+@tool
+def get_current_price(symbol: str) -> float:
+    """Get the current (most recent) price for a stock.
+
+    Args:
+        symbol: Stock symbol to analyze
+
+    Returns:
+        Current price
+    """
+    if _TOOL_STOCK_DATA is None:
+        return 0.0
+
+    df = _TOOL_STOCK_DATA
+    latest = df[df['symbol'] == symbol].sort_values('date', ascending=False).iloc[0]
+    return round(latest['price'], 2)
 
 
 def get_llm():
@@ -37,38 +140,52 @@ def get_llm():
 
 def analyzer_agent(state: TradingState) -> TradingState:
     """
-    Analyzer agent that evaluates stock metrics and provides buy/sell recommendations.
+    Analyzer agent that uses tools to calculate metrics and provides buy/sell recommendations.
     """
+    global _TOOL_STOCK_DATA
+
+    # Get LLM with tools bound
     llm = get_llm()
+    tools = [calculate_momentum, calculate_volatility, calculate_sma, get_current_price]
+    llm_with_tools = llm.bind_tools(tools)
 
     symbol = state["symbol"]
-    metrics = state["metrics"]
+    stock_data = state["stock_data"]
 
-    system_prompt = """You are an expert stock market analyst. Your job is to analyze stock metrics and provide clear buy/sell/hold recommendations.
+    # Set global stock data for tools to access
+    _TOOL_STOCK_DATA = stock_data
 
-Consider the following factors:
-- Current price vs average price
-- Price momentum (positive or negative trend)
-- Volatility (higher volatility = higher risk)
-- Price vs 10-day Simple Moving Average (SMA)
+    system_prompt = """You are an expert stock market analyst with access to tools for calculating technical indicators.
 
-IMPORTANT: You MUST end your response with these exact lines:
+You have access to these tools:
+- get_current_price(symbol): Get the current price of a stock
+- calculate_momentum(symbol, lookback): Calculate price momentum percentage (default lookback=20)
+- calculate_volatility(symbol, lookback): Calculate price volatility (default lookback=20)
+- calculate_sma(symbol, period): Calculate Simple Moving Average (default period=10)
+
+First, use the tools to gather metrics for the stock. Then analyze:
+- Current price trends
+- Price momentum (positive or negative)
+- Volatility level (higher = more risky)
+- Price relative to SMA
+
+IMPORTANT: After your analysis, you MUST end your response with:
 Recommendation: [BUY/SELL/HOLD]
 Confidence: [0.0-1.0]
 
 Be concise and actionable."""
 
-    user_prompt = f"""Analyze the following stock:
+    user_prompt = f"""Analyze {symbol} using the available tools.
 
-Symbol: {symbol}
-Current Price: ${metrics.get('current_price', 'N/A')}
-Average Price (20 days): ${metrics.get('average_price', 'N/A')}
-Volatility: {metrics.get('volatility', 'N/A')}
-Momentum: {metrics.get('momentum_pct', 'N/A')}%
-10-day SMA: ${metrics.get('sma_10', 'N/A')}
-Price vs SMA: {metrics.get('price_vs_sma', 'N/A')}%
+1. First call the tools to get:
+   - Current price using get_current_price("{symbol}")
+   - Momentum using calculate_momentum("{symbol}")
+   - Volatility using calculate_volatility("{symbol}")
+   - SMA using calculate_sma("{symbol}")
 
-Provide your analysis (2-3 sentences), then on separate lines:
+2. Then provide your trading analysis and recommendation.
+
+Remember to end with:
 Recommendation: [BUY/SELL/HOLD]
 Confidence: [score between 0.0 and 1.0]"""
 
@@ -77,8 +194,55 @@ Confidence: [score between 0.0 and 1.0]"""
         HumanMessage(content=user_prompt)
     ]
 
-    response = llm.invoke(messages)
-    analysis_text = response.content
+    # First invocation - LLM will call tools
+    response = llm_with_tools.invoke(messages)
+
+    # Check if LLM wants to use tools
+    if response.tool_calls:
+        # Add the assistant message with tool calls
+        messages.append(response)
+
+        # Execute tool calls and collect results
+        from langchain_core.messages import ToolMessage
+
+        for tool_call in response.tool_calls:
+            tool_name = tool_call['name']
+            tool_args = tool_call['args']
+
+            # Execute the tool (tools now access global _TOOL_STOCK_DATA)
+            if tool_name == 'calculate_momentum':
+                result = calculate_momentum.invoke(tool_args)
+            elif tool_name == 'calculate_volatility':
+                result = calculate_volatility.invoke(tool_args)
+            elif tool_name == 'calculate_sma':
+                result = calculate_sma.invoke(tool_args)
+            elif tool_name == 'get_current_price':
+                result = get_current_price.invoke(tool_args)
+            else:
+                result = "Tool not found"
+
+            # Add properly formatted tool result message
+            messages.append(
+                ToolMessage(
+                    content=str(result),
+                    tool_call_id=tool_call['id']
+                )
+            )
+
+        # Second invocation - get final analysis
+        response = llm_with_tools.invoke(messages)
+
+    # Extract analysis text (handle both string and list content)
+    if isinstance(response.content, str):
+        analysis_text = response.content
+    elif isinstance(response.content, list):
+        # Handle list of content blocks (text and tool_use blocks)
+        analysis_text = " ".join([
+            block.get('text', '') if isinstance(block, dict) else str(block)
+            for block in response.content
+        ])
+    else:
+        analysis_text = str(response.content)
 
     # Parse the response to extract recommendation and confidence
     recommendation = "HOLD"
@@ -158,10 +322,12 @@ def executor_agent(state: TradingState) -> TradingState:
     Executor agent that executes buy/sell orders based on analyst recommendations
     and risk level parameters.
     """
+    global _TOOL_STOCK_DATA
+
     symbol = state["symbol"]
     recommendation = state["recommendation"]
     confidence = state["confidence"]
-    metrics = state["metrics"]
+    stock_data = state["stock_data"]
     portfolio = state.get("portfolio", {"cash": 100000.0, "holdings": {}})
     risk_level = state.get("risk_level", "moderate")
 
@@ -171,7 +337,9 @@ def executor_agent(state: TradingState) -> TradingState:
     max_position_size = risk_params["max_position_size"]
     sell_threshold = risk_params["sell_threshold"]
 
-    current_price = metrics.get("current_price", 0)
+    # Set global stock data and get current price using the tool
+    _TOOL_STOCK_DATA = stock_data
+    current_price = get_current_price.invoke({"symbol": symbol})
     current_holdings = portfolio["holdings"].get(symbol, 0)
     cash = portfolio["cash"]
 
@@ -249,28 +417,24 @@ def create_trading_workflow() -> StateGraph:
 
 
 if __name__ == "__main__":
-    # Test the workflow
-    print("Testing trading workflow...")
+    # Test the workflow with tools
+    print("Testing trading workflow with tools...")
 
-    # Sample metrics
-    test_metrics = {
-        'symbol': 'STOCK000',
-        'current_price': 150.25,
-        'average_price': 145.50,
-        'volatility': 0.0234,
-        'momentum_pct': 3.26,
-        'sma_10': 148.75,
-        'price_vs_sma': 1.01
-    }
+    from stock_data import generate_stock_data
+
+    # Generate sample stock data
+    df = generate_stock_data(num_stocks=10, num_days=50, seed=42)
 
     initial_state = {
         "symbol": "STOCK000",
-        "metrics": test_metrics,
+        "stock_data": df,
         "portfolio": {"cash": 100000.0, "holdings": {}},
+        "risk_level": "aggressive",
         "messages": []
     }
 
     app = create_trading_workflow()
+    print("Running workflow with tool-calling agents...")
     result = app.invoke(initial_state)
 
     print(f"\n{'='*60}")
@@ -282,3 +446,4 @@ if __name__ == "__main__":
     print(f"\nExecution Result:\n{result['execution_result']}")
     print(f"\nPortfolio Cash: ${result['portfolio']['cash']:,.2f}")
     print(f"Holdings: {result['portfolio']['holdings']}")
+    print(f"\n✓ Test complete! Agents successfully used tools to calculate metrics.")

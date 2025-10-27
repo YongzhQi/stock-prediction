@@ -1,6 +1,6 @@
 """Day-by-day stock trading simulation with smart stock selection."""
 import pandas as pd
-from stock_data import generate_stock_data, calculate_metrics
+from stock_data import generate_stock_data
 from agents import create_trading_workflow, get_risk_params
 from smart_selector import select_stocks_for_day, rank_portfolio_positions
 from visualizations import generate_all_visualizations
@@ -104,7 +104,7 @@ def run_daily_trading_simulation(
         for symbol, shares in portfolio['holdings'].items():
             if shares > 0:
                 try:
-                    current_price = calculate_metrics(historical_df, symbol)['current_price']
+                    current_price = historical_df[historical_df['symbol'] == symbol].sort_values('date', ascending=False).iloc[0]['price']
                     holdings_value += shares * current_price
                 except:
                     pass
@@ -117,16 +117,10 @@ def run_daily_trading_simulation(
         # Analyze each selected stock
         for symbol in selected_symbols:
             try:
-                # Calculate metrics
-                metrics = calculate_metrics(historical_df, symbol, lookback=20)
-
-                if not metrics:
-                    continue
-
-                # Run the trading workflow
+                # Run the trading workflow (agents will calculate metrics using tools)
                 initial_state = {
                     "symbol": symbol,
-                    "metrics": metrics,
+                    "stock_data": historical_df,
                     "portfolio": portfolio,
                     "risk_level": risk_level,
                     "messages": []
@@ -137,6 +131,9 @@ def run_daily_trading_simulation(
                 # Update portfolio with results
                 portfolio = result["portfolio"]
 
+                # Get current price for tracking
+                current_price = historical_df[historical_df['symbol'] == symbol].sort_values('date', ascending=False).iloc[0]['price']
+
                 # Track trade
                 trade_record = {
                     'day': day_idx,
@@ -145,7 +142,7 @@ def run_daily_trading_simulation(
                     'recommendation': result['recommendation'],
                     'confidence': result['confidence'],
                     'execution': result['execution_result'],
-                    'price': metrics['current_price']
+                    'price': current_price
                 }
 
                 day_trades.append(trade_record)
@@ -171,7 +168,7 @@ def run_daily_trading_simulation(
         for symbol, shares in portfolio['holdings'].items():
             if shares > 0:
                 try:
-                    current_price = calculate_metrics(historical_df, symbol)['current_price']
+                    current_price = historical_df[historical_df['symbol'] == symbol].sort_values('date', ascending=False).iloc[0]['price']
                     holdings_value += shares * current_price
                 except:
                     pass
@@ -205,7 +202,7 @@ def run_daily_trading_simulation(
     for symbol, shares in portfolio['holdings'].items():
         if shares > 0:
             try:
-                current_price = calculate_metrics(df, symbol)['current_price']
+                current_price = df[df['symbol'] == symbol].sort_values('date', ascending=False).iloc[0]['price']
                 value = shares * current_price
                 total_holdings_value += value
                 final_holdings.append({
